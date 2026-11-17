@@ -1,5 +1,12 @@
 const _fieldDelimiter = ';';
 const _bookFieldCount = 6;
+const _earliestPublicationYear = 1450;
+const _maximumPageCount = 10000;
+
+final _authorPattern = RegExp(
+  r'^(?<initial>\S)(?<hidden>\S*)(?<surname>\s+\S(?:.*\S)?)$',
+  unicode: true,
+);
 
 /// Книга домашньої бібліотеки без використання класу.
 typedef Book = ({
@@ -17,10 +24,14 @@ typedef BookParseResult = ({Book? book, String? error});
 /// Результат розбору всього набору вхідних рядків.
 typedef BookListParseResult = ({List<Book> books, List<String> errors});
 
+/// Результат перевірки однієї книги.
+typedef BookValidationResult = ({Book book, List<String> errors});
+
 /// Вхідні дані у CSV-подібному форматі з роздільником `;`.
 ///
-/// Чотири останні рядки навмисно пошкоджено: у них відсутнє поле,
-/// нечисловий рік, нечислова кількість сторінок і некоректна дата.
+/// Три записи перед пошкодженими рядками містять порушення правил валідації.
+/// Чотири останні рядки не розбираються: у них відсутнє поле, нечисловий рік,
+/// нечислова кількість сторінок і некоректна дата.
 const bookInputLines = <String>[
   'Джордж Орвелл;1984;1949;328;антиутопія;2025-01-12',
   'Рей Бредбері;451 градус за Фаренгейтом;1953;256;антиутопія;2025-02-03',
@@ -36,6 +47,9 @@ const bookInputLines = <String>[
   'Стівен Кінг;Зелена миля;1996;432;містика;2025-08-24',
   'Іван Багряний;Тигролови;1944;304;пригоди;2025-09-11',
   'Валер\u0027ян Підмогильний;Місто;1928;352;роман;2025-10-05',
+  'ОдинАвтор;Таємнича книга;2022;220;містика;2025-10-18',
+  'Тестовий Автор;Нуль сторінок;2021;0;довідкова;2025-10-20',
+  'Майбутній Автор;Книга з майбутнього;2027;300;фантастика;2027-01-10',
   'Ліна Костенко;Маруся Чурай;1979;224;історичний роман',
   'Сергій Жадан;Інтернат;дві тисячі сімнадцять;336;роман;2025-10-22',
   'Макс Кідрук;Колонія;2023;шістсот;фантастика;2025-11-02',
@@ -118,17 +132,119 @@ BookListParseResult parseBookLines(Iterable<String> lines) {
   return (books: books, errors: errors);
 }
 
+/// Перевіряє діапазони значень і формат автора в [book].
+///
+/// [referenceDate] дає змогу виконувати перевірку відносно заданої дати.
+/// Якщо її не передано, використовується поточний момент.
+List<String> validateBook(Book book, {DateTime? referenceDate}) {
+  final currentDate = referenceDate ?? DateTime.now();
+  final errors = <String>[];
+
+  final publicationYearIsValid =
+      book.publicationYear >= _earliestPublicationYear &&
+      book.publicationYear <= currentDate.year;
+  if (!publicationYearIsValid) {
+    errors.add(
+      'рік видання має бути в межах '
+      '$_earliestPublicationYear–${currentDate.year}',
+    );
+  }
+
+  if (book.pageCount <= 0 || book.pageCount > _maximumPageCount) {
+    errors.add('кількість сторінок має бути від 1 до $_maximumPageCount');
+  }
+
+  if (!_authorPattern.hasMatch(book.author)) {
+    errors.add('автор має містити щонайменше ім’я та прізвище');
+  }
+
+  if (book.readDate.isAfter(currentDate)) {
+    errors.add('дата прочитання не може бути в майбутньому');
+  }
+
+  if (publicationYearIsValid &&
+      book.readDate.isBefore(DateTime(book.publicationYear))) {
+    errors.add('дата прочитання не може передувати року видання');
+  }
+
+  return List.unmodifiable(errors);
+}
+
+/// Перевіряє всі [books] і повертає помилки для кожного запису.
+List<BookValidationResult> validateBooks(
+  Iterable<Book> books, {
+  DateTime? referenceDate,
+}) => books
+    .map(
+      (book) => (
+        book: book,
+        errors: validateBook(book, referenceDate: referenceDate),
+      ),
+    )
+    .toList(growable: false);
+
+/// Маскує частину імені автора, зберігаючи першу літеру та прізвище.
+///
+/// Для пошуку частин імені використовується регулярний вираз з іменованими
+/// групами, а заміна виконується через `replaceAllMapped`.
+String maskAuthor(String author) =>
+    author.replaceAllMapped(_authorPattern, (match) {
+      final regexMatch = match as RegExpMatch;
+      final initial = regexMatch.namedGroup('initial') ?? '';
+      final hidden = regexMatch.namedGroup('hidden') ?? '';
+      final surname = regexMatch.namedGroup('surname') ?? '';
+      final mask = List.filled(hidden.runes.length, '*').join();
+      return '$initial$mask$surname';
+    });
+
+/// Обчислює кількість повних днів від прочитання [book].
+int daysSinceRead(Book book, {DateTime? referenceDate}) {
+  final currentDate = referenceDate ?? DateTime.now();
+  final age = currentDate.difference(book.readDate);
+  return age.inDays;
+}
+
 /// Запускає консольний застосунок «Домашня бібліотека».
 void runApplication() {
-  final result = parseBookLines(bookInputLines);
+  final parseResult = parseBookLines(bookInputLines);
+  final referenceDate = DateTime.now();
+  final validationResults = validateBooks(
+    parseResult.books,
+    referenceDate: referenceDate,
+  );
+  final validBooks = validationResults
+      .where((result) => result.errors.isEmpty)
+      .toList(growable: false);
+  final invalidBooks = validationResults
+      .where((result) => result.errors.isNotEmpty)
+      .toList(growable: false);
 
   print('Домашня бібліотека');
   print('Отримано рядків: ${bookInputLines.length}.');
-  print('Успішно розібрано: ${result.books.length}.');
-  print('Відхилено: ${result.errors.length}.');
+  print('Успішно розібрано: ${parseResult.books.length}.');
+  print('Не розібрано: ${parseResult.errors.length}.');
+  print('Пройшли валідацію: ${validBooks.length}.');
+  print('Не пройшли валідацію: ${invalidBooks.length}.');
 
-  if (result.errors.isNotEmpty) {
+  if (parseResult.errors.isNotEmpty) {
     print('\nПомилки вхідних даних:');
-    result.errors.forEach(print);
+    parseResult.errors.forEach(print);
+  }
+
+  if (invalidBooks.isNotEmpty) {
+    print('\nПорушення правил валідації:');
+    for (final result in invalidBooks) {
+      final author = maskAuthor(result.book.author);
+      print('$author — ${result.book.title}: ${result.errors.join('; ')}.');
+    }
+  }
+
+  if (validBooks.isNotEmpty) {
+    final sample = validBooks.first.book;
+    final age = daysSinceRead(sample, referenceDate: referenceDate);
+    print(
+      '\nПриклад маскування: ${maskAuthor(sample.author)}. '
+      'Від прочитання книги «${sample.title}» минуло $age днів.',
+    );
   }
 }
