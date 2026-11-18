@@ -27,6 +27,9 @@ typedef BookListParseResult = ({List<Book> books, List<String> errors});
 /// Результат перевірки однієї книги.
 typedef BookValidationResult = ({Book book, List<String> errors});
 
+/// Функція порівняння двох книг для повторного використання в сортуванні.
+typedef BookComparator = int Function(Book left, Book right);
+
 /// Вхідні дані у CSV-подібному форматі з роздільником `;`.
 ///
 /// Три записи перед пошкодженими рядками містять порушення правил валідації.
@@ -204,6 +207,90 @@ int daysSinceRead(Book book, {DateTime? referenceDate}) {
   return age.inDays;
 }
 
+/// Створює предикат, який залишає книги не тонші за [minimumPages].
+///
+/// Повернене замикання захоплює значення [minimumPages] і зберігає його між
+/// викликами предиката.
+bool Function(Book) makeMinimumPageCountPredicate(int minimumPages) =>
+    (book) => book.pageCount >= minimumPages;
+
+/// Фільтрує [books] за мінімальною кількістю сторінок.
+List<Book> filterBooksByMinimumPages(
+  Iterable<Book> books, {
+  int minimumPages = 300,
+}) => books
+    .where(makeMinimumPageCountPredicate(minimumPages))
+    .toList(growable: false);
+
+/// Перетворює [books] на короткі текстові описи.
+List<String> formatBookLabels(Iterable<Book> books) => books
+    .map((book) => '${book.author} — «${book.title}» (${book.pageCount} с.)')
+    .toList(growable: false);
+
+/// Підраховує сторінки у книгах, виданих не раніше [publicationYear].
+///
+/// Агрегація побудована як конвеєр `where → map → fold`.
+int totalPagesPublishedSince(
+  Iterable<Book> books, {
+  int publicationYear = 1950,
+}) => books
+    .where((book) => book.publicationYear >= publicationYear)
+    .map((book) => book.pageCount)
+    .fold(0, (total, pageCount) => total + pageCount);
+
+/// Групує [books] за жанром.
+Map<String, List<Book>> groupBooksByGenre(Iterable<Book> books) {
+  final groups = books.fold(<String, List<Book>>{}, (result, book) {
+    result.putIfAbsent(book.genre, () => <Book>[]).add(book);
+    return result;
+  });
+
+  return Map<String, List<Book>>.unmodifiable(
+    groups.map<String, List<Book>>(
+      (genre, genreBooks) =>
+          MapEntry(genre, List<Book>.unmodifiable(genreBooks)),
+    ),
+  );
+}
+
+/// Обчислює середню кількість сторінок для кожної групи в [groups].
+Map<String, double> averagePagesByGenre(Map<String, List<Book>> groups) =>
+    Map<String, double>.unmodifiable(
+      groups.map<String, double>((genre, books) {
+        final totalPages = books
+            .map((book) => book.pageCount)
+            .fold(0, (total, pageCount) => total + pageCount);
+        return MapEntry(genre, totalPages / books.length);
+      }),
+    );
+
+/// Порівнює книги спочатку за роком видання, потім за назвою.
+int compareBooksByPublicationYear(Book left, Book right) {
+  final byYear = left.publicationYear.compareTo(right.publicationYear);
+  return byYear != 0 ? byYear : left.title.compareTo(right.title);
+}
+
+/// Порівнює книги спочатку за назвою, потім за автором.
+int compareBooksByTitle(Book left, Book right) {
+  final byTitle = left.title.compareTo(right.title);
+  return byTitle != 0 ? byTitle : left.author.compareTo(right.author);
+}
+
+/// Повертає відсортовану копію [books], не змінюючи початкову колекцію.
+///
+/// [comparator] задає критерій, а [ascending] — напрям сортування.
+List<Book> sortBooks(
+  Iterable<Book> books,
+  BookComparator comparator, {
+  bool ascending = true,
+}) {
+  final result = books.toList();
+  result.sort((left, right) {
+    return ascending ? comparator(left, right) : comparator(right, left);
+  });
+  return List.unmodifiable(result);
+}
+
 /// Запускає консольний застосунок «Домашня бібліотека».
 void runApplication() {
   final parseResult = parseBookLines(bookInputLines);
@@ -218,6 +305,7 @@ void runApplication() {
   final invalidBooks = validationResults
       .where((result) => result.errors.isNotEmpty)
       .toList(growable: false);
+  final books = validBooks.map((result) => result.book).toList(growable: false);
 
   print('Домашня бібліотека');
   print('Отримано рядків: ${bookInputLines.length}.');
@@ -245,6 +333,43 @@ void runApplication() {
     print(
       '\nПриклад маскування: ${maskAuthor(sample.author)}. '
       'Від прочитання книги «${sample.title}» минуло $age днів.',
+    );
+  }
+
+  final largeBooks = filterBooksByMinimumPages(books, minimumPages: 400);
+  final largeBookLabels = formatBookLabels(largeBooks);
+  final modernPageCount = totalPagesPublishedSince(
+    books,
+    publicationYear: 1950,
+  );
+  final booksByGenre = groupBooksByGenre(books);
+  final averagesByGenre = averagePagesByGenre(booksByGenre);
+  final sortedAverages = averagesByGenre.entries.toList()
+    ..sort((left, right) => left.key.compareTo(right.key));
+  final oldestFirst = sortBooks(books, compareBooksByPublicationYear);
+  final titleDescending = sortBooks(
+    books,
+    compareBooksByTitle,
+    ascending: false,
+  );
+
+  print('\nКниги від 400 сторінок:');
+  largeBookLabels.forEach(print);
+  print('Сторінок у книгах, виданих від 1950 року: $modernPageCount.');
+
+  print('\nСередня кількість сторінок за жанрами:');
+  for (final entry in sortedAverages) {
+    print('${entry.key}: ${entry.value.toStringAsFixed(1)}.');
+  }
+
+  if (oldestFirst.isNotEmpty && titleDescending.isNotEmpty) {
+    print(
+      '\nНайраніша за роком видання: ${oldestFirst.first.title} '
+      '(${oldestFirst.first.publicationYear}).',
+    );
+    print(
+      'Перша за назвою у зворотному порядку: '
+      '${titleDescending.first.title}.',
     );
   }
 }
